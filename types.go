@@ -34,6 +34,10 @@ type UpdateAccountRequest struct {
 	FirstName   *string `json:"firstName"`
 	LastName    *string `json:"lastName"`
 }
+type UpdatePasswordRequest struct {
+	Oldpw string `json:"oldpw"`
+	Newpw string `json:"oldnew"`
+}
 type LoginRequest struct {
 	Number   int64  `json:"number"`
 	Password string `json:"password"`

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,12 +12,16 @@ import (
 
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type APIServer struct {
 	listenAddr string
 	store      Storage
 }
+type contextKey string
+
+const jwtClaimsKey contextKey = "jwtClaims"
 
 func NewAPIServer(listenAddr string, store Storage) *APIServer {
 	return &APIServer{
@@ -114,6 +119,9 @@ func (s *APIServer) handleCreateAccount(w http.ResponseWriter, r *http.Request) 
 	if err := json.NewDecoder(r.Body).Decode(req); err != nil {
 		return err
 	}
+	if req.PhoneNumber == "" || req.FirstName == "" || req.LastName == "" || req.EncryptedPassword == "" {
+		return fmt.Errorf("fields cannot be empty")
+	}
 	account, err := newAccount(req.PhoneNumber, req.FirstName, req.LastName, req.EncryptedPassword)
 	if err != nil {
 		return err
@@ -164,8 +172,56 @@ func (s *APIServer) handleUpdateAccount(w http.ResponseWriter, r *http.Request) 
 	return WriteJSON(w, http.StatusOK, existingAccount)
 }
 func (s *APIServer) handleUpdatePassword(w http.ResponseWriter, r *http.Request) error {
-	// to do
-	return nil
+	if r.Method != "POST" {
+		return fmt.Errorf("method not allowed %s", r.Method)
+	}
+
+	claims, ok := r.Context().Value(jwtClaimsKey).(jwt.MapClaims)
+	if !ok {
+		permissionDenied(w)
+		return nil
+	}
+
+	id, err := getID(r)
+	if err != nil {
+		return err
+	}
+	acc, err := s.store.GetAccountByID(id)
+	if err != nil {
+		return err
+	}
+	tokenString := r.Header.Get("x-jwt-token")
+	token, err := validateJWT(tokenString)
+	if err != nil {
+		permissionDenied(w)
+		return nil
+	}
+	if !token.Valid {
+		permissionDenied(w)
+		return nil
+	}
+	if acc.Number != int64(claims["accountNumber"].(float64)) {
+		permissionDenied(w)
+		return nil
+	}
+	req := new(UpdatePasswordRequest)
+	if err := json.NewDecoder(r.Body).Decode(req); err != nil {
+		return err
+	}
+
+	if !acc.validatePassword(req.Oldpw) {
+		return fmt.Errorf("old password doesnt match")
+	}
+	encpw, err := bcrypt.GenerateFromPassword([]byte(req.Newpw), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	err = s.store.UpdatePassword(acc, encpw)
+	if err != nil {
+		return err
+	}
+
+	return WriteJSON(w, http.StatusOK, map[string]string{"message": "password updated successfully"})
 }
 
 func (s *APIServer) handleDeleteAccount(w http.ResponseWriter, r *http.Request) error {
@@ -243,7 +299,14 @@ func withJWTAuth(handlerFunc http.HandlerFunc, s Storage) http.HandlerFunc {
 		claims := token.Claims.(jwt.MapClaims)
 		if account.Number != int64(claims["accountNumber"].(float64)) {
 			permissionDenied(w)
+			return
 		}
+		ctx := context.WithValue(r.Context(), jwtClaimsKey, claims)
+
+		// 2. Create a copy of the request containing our new context
+		r = r.WithContext(ctx)
+
+		// 3. Pass the updated request down to the handler
 		handlerFunc(w, r)
 	}
 }

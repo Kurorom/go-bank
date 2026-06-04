@@ -13,6 +13,7 @@ type Storage interface {
 	CreateAccount(*Account) error
 	DeleteAccount(int) error
 	UpdateAccount(*Account) error
+	UpdatePassword(*Account, []byte) error
 	GetAccountByNumber(int) (*Account, error)
 	GetAccountByID(int) (*Account, error)
 	GetAccounts() ([]*Account, error)
@@ -134,6 +135,28 @@ func (s *PostgresStore) UpdateAccount(acc *Account) error {
 
 	return nil
 }
+
+func (s *PostgresStore) UpdatePassword(acc *Account, encpw []byte) error {
+
+	query := `UPDATE account 
+	set encrypted_password = $1 where id = $2
+	`
+	res, err := s.db.Exec(query,
+		encpw,
+		acc.ID)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("account with id %d not found", acc.ID)
+	}
+	return nil
+}
+
 func (s *PostgresStore) DeleteAccount(id int) error {
 	result, err := s.db.Exec("DELETE FROM account where id = $1", id)
 	if err != nil {
