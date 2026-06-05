@@ -37,7 +37,7 @@ func (s *APIServer) Run() {
 	router.HandleFunc("/account", makeHTTPHandlerFunc(s.handleAccount))
 	router.HandleFunc("/account/{id}", withJWTAuth(makeHTTPHandlerFunc(s.handleGetAccountByID), s.store))
 	router.HandleFunc("/account/{id}/password", withJWTAuth(makeHTTPHandlerFunc(s.handleUpdatePassword), s.store)) // to do
-	router.HandleFunc("/transfer", makeHTTPHandlerFunc(s.handleTransfer))
+	router.HandleFunc("/transfer", withJWTAuth(makeHTTPHandlerFunc(s.handleTransfer), s.store))
 
 	log.Println("JSON API server listening in port: ", s.listenAddr)
 
@@ -190,16 +190,7 @@ func (s *APIServer) handleUpdatePassword(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		return err
 	}
-	tokenString := r.Header.Get("x-jwt-token")
-	token, err := validateJWT(tokenString)
-	if err != nil {
-		permissionDenied(w)
-		return nil
-	}
-	if !token.Valid {
-		permissionDenied(w)
-		return nil
-	}
+
 	if acc.Number != int64(claims["accountNumber"].(float64)) {
 		permissionDenied(w)
 		return nil
@@ -216,7 +207,7 @@ func (s *APIServer) handleUpdatePassword(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		return err
 	}
-	err = s.store.UpdatePassword(acc, encpw)
+	err = s.store.UpdatePassword(acc, string(encpw))
 	if err != nil {
 		return err
 	}
@@ -237,12 +228,42 @@ func (s *APIServer) handleDeleteAccount(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *APIServer) handleTransfer(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != "POST" {
+		return fmt.Errorf("method not allowed %s", r.Method)
+	}
+
+	claims, ok := r.Context().Value(jwtClaimsKey).(jwt.MapClaims)
+	if !ok {
+		permissionDenied(w)
+		return nil
+	}
+
 	transferReq := new(TransferRequet)
+
 	if err := json.NewDecoder(r.Body).Decode(transferReq); err != nil {
 		return err
 	}
+
 	defer r.Body.Close()
 
+	if transferReq.Amount <= 0 {
+		return fmt.Errorf("transfer amount must be greater than zero")
+	}
+
+	fromAcc, err := s.store.GetAccountByNumber(int(claims["accountNumber"].(float64)))
+	if err != nil {
+		return err
+	}
+	if fromAcc.Number == transferReq.ToAccount {
+		return fmt.Errorf("cannot transfer money to your own account number")
+	}
+	if fromAcc.Balance < transferReq.Amount {
+		return fmt.Errorf("insufficient balance")
+	}
+	err = s.store.Transfer(fromAcc.ID, transferReq.ToAccount, transferReq.Amount)
+	if err != nil {
+		return err
+	}
 	return WriteJSON(w, http.StatusOK, transferReq)
 }
 
@@ -286,27 +307,26 @@ func withJWTAuth(handlerFunc http.HandlerFunc, s Storage) http.HandlerFunc {
 			permissionDenied(w)
 			return
 		}
-
-		userID, err := getID(r)
-		if err != nil {
-			permissionDenied(w)
-		}
-		account, err := s.GetAccountByID(userID)
-		if err != nil {
-			permissionDenied(w)
-			return
-		}
 		claims := token.Claims.(jwt.MapClaims)
-		if account.Number != int64(claims["accountNumber"].(float64)) {
-			permissionDenied(w)
-			return
+
+		if _, hasID := mux.Vars(r)["id"]; hasID {
+			userID, err := getID(r)
+			if err != nil {
+				permissionDenied(w)
+			}
+			account, err := s.GetAccountByID(userID)
+			if err != nil {
+				permissionDenied(w)
+				return
+			}
+			if account.Number != int64(claims["accountNumber"].(float64)) {
+				permissionDenied(w)
+				return
+			}
 		}
 		ctx := context.WithValue(r.Context(), jwtClaimsKey, claims)
-
-		// 2. Create a copy of the request containing our new context
 		r = r.WithContext(ctx)
 
-		// 3. Pass the updated request down to the handler
 		handlerFunc(w, r)
 	}
 }
@@ -342,9 +362,11 @@ func makeHTTPHandlerFunc(f apiFunc) http.HandlerFunc {
 
 func getID(r *http.Request) (int, error) {
 	idstr := mux.Vars(r)["id"]
+
 	id, err := strconv.Atoi(idstr)
 	if err != nil {
 		return id, fmt.Errorf("invalid id given %s", idstr)
+
 	}
 	return id, nil
 }

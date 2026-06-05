@@ -13,10 +13,12 @@ type Storage interface {
 	CreateAccount(*Account) error
 	DeleteAccount(int) error
 	UpdateAccount(*Account) error
-	UpdatePassword(*Account, []byte) error
+	UpdatePassword(*Account, string) error
 	GetAccountByNumber(int) (*Account, error)
 	GetAccountByID(int) (*Account, error)
 	GetAccounts() ([]*Account, error)
+	UpdateBalace(*Account, int) error
+	Transfer(fromID int, toAccountNumber int64, amount int64) error
 }
 
 type PostgresStore struct {
@@ -136,7 +138,7 @@ func (s *PostgresStore) UpdateAccount(acc *Account) error {
 	return nil
 }
 
-func (s *PostgresStore) UpdatePassword(acc *Account, encpw []byte) error {
+func (s *PostgresStore) UpdatePassword(acc *Account, encpw string) error {
 
 	query := `UPDATE account 
 	set encrypted_password = $1 where id = $2
@@ -173,7 +175,7 @@ func (s *PostgresStore) DeleteAccount(id int) error {
 }
 
 func (s *PostgresStore) GetAccountByNumber(number int) (*Account, error) {
-	rows, err := s.db.Query("SELECT  * from account where number=$1", number)
+	rows, err := s.db.Query("SELECT id, phone_number, first_name, last_name, number, encrypted_password, balance, created_at FROM account WHERE number=$1", number)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +188,7 @@ func (s *PostgresStore) GetAccountByNumber(number int) (*Account, error) {
 
 }
 func (s *PostgresStore) GetAccountByID(id int) (*Account, error) {
-	rows, err := s.db.Query("SELECT  * from account where id=$1", id)
+	rows, err := s.db.Query("SELECT id, phone_number, first_name, last_name, number, encrypted_password, balance, created_at FROM account WHERE id=$1", id)
 	if err != nil {
 		return nil, err
 	}
@@ -214,6 +216,55 @@ func (s *PostgresStore) GetAccounts() ([]*Account, error) {
 		accounts = append(accounts, account)
 	}
 	return accounts, nil
+}
+func (s *PostgresStore) UpdateBalace(acc *Account, amount int) error {
+	query := `UPDATE account 
+	set balance= $1 where number = $2`
+
+	res, err := s.db.Exec(query, amount, acc.Number)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("transfer failed")
+	}
+	return nil
+}
+
+func (s *PostgresStore) Transfer(senderID int, ReceiverNumber int64, amount int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	deductQuery := `UPDATE account SET balance = balance - $1 WHERE id = $2 AND balance >= $1`
+	res, err := tx.Exec(deductQuery, amount, senderID)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := res.RowsAffected()
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("transfer failed")
+	}
+	creditQuery := `UPDATE account SET balance = balance + $1 WHERE number = $2`
+	res, err = tx.Exec(creditQuery, amount, ReceiverNumber)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err = res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("recipient account number %d does not exist", ReceiverNumber)
+	}
+	return tx.Commit()
 }
 
 func scanIntoAccount(rows *sql.Rows) (*Account, error) {

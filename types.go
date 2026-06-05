@@ -8,8 +8,8 @@ import (
 )
 
 type TransferRequet struct {
-	ToAccount int `json:"toAccount"`
-	Amount    int `json:"amount"`
+	ToAccount int64 `json:"toAccount"`
+	Amount    int64 `json:"amount"`
 }
 
 type Account struct {
@@ -36,7 +36,7 @@ type UpdateAccountRequest struct {
 }
 type UpdatePasswordRequest struct {
 	Oldpw string `json:"oldpw"`
-	Newpw string `json:"oldnew"`
+	Newpw string `json:"newpw"`
 }
 type LoginRequest struct {
 	Number   int64  `json:"number"`
