@@ -7,11 +7,17 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-type TransferRequet struct {
-	ToAccount int64 `json:"toAccount"`
-	Amount    int64 `json:"amount"`
+type CreateTransactionRequest struct {
+	Receivernumber int64 `json:"receiverNumber" validate:"required,gt=0"`
+	Amount         int64 `json:"amount" validate:"required,min=1"`
 }
-
+type Transaction struct {
+	ID             int       `json:"id"`
+	SenderID       int       `json:"senderID"`
+	ReceiverNumber int64     `json:"receiverNumber"`
+	Amount         int64     `json:"amount"`
+	CreatedAt      time.Time `json:"createdAt"`
+}
 type Account struct {
 	ID                int       `json:"id"`
 	PhoneNumber       string    `json:"phoneNumber"`
@@ -24,15 +30,15 @@ type Account struct {
 }
 
 type CreateAccountRequest struct {
-	PhoneNumber       string `json:"phoneNumber"`
-	FirstName         string `json:"firstName"`
-	LastName          string `json:"lastName"`
-	EncryptedPassword string `json:"password"`
+	FirstName         string `json:"firstName" validate:"required,min=2,max=50"`
+	LastName          string `json:"lastName" validate:"required,min=2,max=50"`
+	PhoneNumber       string `json:"phoneNumber" validate:"required,min=7,max=15"`
+	EncryptedPassword string `json:"password" validate:"required,min=8"`
 }
 type UpdateAccountRequest struct {
-	PhoneNumber *string `json:"phoneNumber"`
-	FirstName   *string `json:"firstName"`
-	LastName    *string `json:"lastName"`
+	PhoneNumber *string `json:"phoneNumber" validate:"omitempty,gt=0"`
+	FirstName   *string `json:"firstName" validate:"omitempty,gt=0"`
+	LastName    *string `json:"lastName" validate:"omitempty,gt=0"`
 }
 type UpdatePasswordRequest struct {
 	Oldpw string `json:"oldpw"`
@@ -60,6 +66,15 @@ func newAccount(phoneNumber string, firstName, lastName string, password string)
 		Number:            int64(rand.Intn(100000)),
 		EncryptedPassword: string(encpw),
 		CreatedAt:         time.Now().UTC(),
+	}, nil
+}
+func newTransaction(senderID int, receivernumber int64, amount int64) (*Transaction, error) {
+
+	return &Transaction{
+		SenderID:       senderID,
+		ReceiverNumber: receivernumber,
+		Amount:         amount,
+		CreatedAt:      time.Now().UTC(),
 	}, nil
 }
 

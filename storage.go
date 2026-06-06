@@ -17,8 +17,8 @@ type Storage interface {
 	GetAccountByNumber(int) (*Account, error)
 	GetAccountByID(int) (*Account, error)
 	GetAccounts() ([]*Account, error)
-	UpdateBalace(*Account, int) error
-	Transfer(fromID int, toAccountNumber int64, amount int64) error
+	CreateTransaction(*Transaction) error
+	GetTransactions(int) ([]*Transaction, error)
 }
 
 type PostgresStore struct {
@@ -26,10 +26,9 @@ type PostgresStore struct {
 }
 
 func newPostgresStore() (*PostgresStore, error) {
-	// 1. Fetch values from environment variables, or fall back to defaults
 	dbUser := getEnv("DB_USER", "postgres")
 	dbName := getEnv("DB_NAME", "postgres")
-	dbPass := getEnv("DB_PASSWORD", "gobankpassword") // fallback for local dev
+	dbPass := getEnv("DB_PASSWORD", "gobankpassword")
 	dbHost := getEnv("DB_HOST", "localhost")
 
 	dsn := fmt.Sprintf("user=%s dbname=%s password=%s host=%s sslmode=disable",
@@ -49,7 +48,6 @@ func newPostgresStore() (*PostgresStore, error) {
 	}, nil
 }
 
-// Helper function to handle environment fallbacks
 func getEnv(key, fallback string) string {
 	if value, exists := os.LookupEnv(key); exists {
 		return value
@@ -57,24 +55,27 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-// func newPostgresStore() (*PostgresStore, error) {
-// 	dsn := "user=postgres dbname=postgres password=gobankpassword sslmode=disable"
-// 	db, err := sql.Open("postgres", dsn)
-// 	if err != nil {
-// 		log.Fatal(err)
-// 	}
-
-// 	if err := db.Ping(); err != nil {
-// 		return nil, err
-// 	}
-
-// 	return &PostgresStore{
-// 		db: db,
-// 	}, nil
-// }
-
 func (s *PostgresStore) init() error {
-	return s.createAccountTable()
+	if err := s.createAccountTable(); err != nil {
+		return err
+	}
+	if err := s.createTransactionTable(); err != nil {
+		return err
+	}
+
+	return nil
+}
+func (s *PostgresStore) createTransactionTable() error {
+	query := `CREATE TABLE IF NOT EXISTS transaction
+	 (
+		id serial primary key,
+		sender_id INT REFERENCES account(id),
+		receiver_number INT NOT NULL,
+		amount numeric NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	)`
+	_, err := s.db.Exec(query)
+	return err
 }
 
 func (s *PostgresStore) createAccountTable() error {
@@ -84,7 +85,7 @@ func (s *PostgresStore) createAccountTable() error {
 		phone_number varchar(20),      
 		first_name varchar(50),
 		last_name varchar(50),
-		number serial,
+		number serial UNIQUE,
 		encrypted_password varchar(100),
 		balance numeric,
 		created_at timestamp 
@@ -217,25 +218,9 @@ func (s *PostgresStore) GetAccounts() ([]*Account, error) {
 	}
 	return accounts, nil
 }
-func (s *PostgresStore) UpdateBalace(acc *Account, amount int) error {
-	query := `UPDATE account 
-	set balance= $1 where number = $2`
 
-	res, err := s.db.Exec(query, amount, acc.Number)
-	if err != nil {
-		return err
-	}
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rowsAffected == 0 {
-		return fmt.Errorf("transfer failed")
-	}
-	return nil
-}
+func (s *PostgresStore) CreateTransaction(transaction *Transaction) error {
 
-func (s *PostgresStore) Transfer(senderID int, ReceiverNumber int64, amount int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -243,7 +228,7 @@ func (s *PostgresStore) Transfer(senderID int, ReceiverNumber int64, amount int6
 	defer tx.Rollback()
 
 	deductQuery := `UPDATE account SET balance = balance - $1 WHERE id = $2 AND balance >= $1`
-	res, err := tx.Exec(deductQuery, amount, senderID)
+	res, err := tx.Exec(deductQuery, transaction.Amount, transaction.SenderID)
 	if err != nil {
 		return err
 	}
@@ -253,7 +238,7 @@ func (s *PostgresStore) Transfer(senderID int, ReceiverNumber int64, amount int6
 		return fmt.Errorf("transfer failed")
 	}
 	creditQuery := `UPDATE account SET balance = balance + $1 WHERE number = $2`
-	res, err = tx.Exec(creditQuery, amount, ReceiverNumber)
+	res, err = tx.Exec(creditQuery, transaction.Amount, transaction.ReceiverNumber)
 	if err != nil {
 		return err
 	}
@@ -262,9 +247,36 @@ func (s *PostgresStore) Transfer(senderID int, ReceiverNumber int64, amount int6
 		return err
 	}
 	if rowsAffected == 0 {
-		return fmt.Errorf("recipient account number %d does not exist", ReceiverNumber)
+		return fmt.Errorf("recipient account number %d does not exist", transaction.ReceiverNumber)
+	}
+	insertQuery := `INSERT INTO transaction (sender_id, receiver_number, amount, created_at) VALUES ($1, $2, $3, $4)`
+	_, err = tx.Exec(insertQuery, transaction.SenderID, transaction.ReceiverNumber, transaction.Amount, transaction.CreatedAt)
+	if err != nil {
+		// If the logging fails, returning here triggers defer dbTx.Rollback(),
+		// safely reversing the deducted and credited money above!
+		return err
 	}
 	return tx.Commit()
+
+}
+
+func (s *PostgresStore) GetTransactions(id int) ([]*Transaction, error) {
+	query := `SELECT * from transaction where sender_id = $1`
+
+	rows, err := s.db.Query(query, id)
+	if err != nil {
+		return nil, err
+	}
+	transactions := []*Transaction{}
+	for rows.Next() {
+		transaction, err := scanIntoTransactions(rows)
+		if err != nil {
+			return nil, err
+		}
+		transactions = append(transactions, transaction)
+
+	}
+	return transactions, nil
 }
 
 func scanIntoAccount(rows *sql.Rows) (*Account, error) {
@@ -280,4 +292,15 @@ func scanIntoAccount(rows *sql.Rows) (*Account, error) {
 		&account.CreatedAt)
 
 	return account, err
+}
+func scanIntoTransactions(rows *sql.Rows) (*Transaction, error) {
+	transaction := new(Transaction)
+	err := rows.Scan(
+		&transaction.ID,
+		&transaction.SenderID,
+		&transaction.ReceiverNumber,
+		&transaction.Amount,
+		&transaction.CreatedAt)
+
+	return transaction, err
 }

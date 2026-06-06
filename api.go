@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/go-playground/validator/v10"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
 	"golang.org/x/crypto/bcrypt"
@@ -18,7 +20,9 @@ import (
 type APIServer struct {
 	listenAddr string
 	store      Storage
+	validate   *validator.Validate
 }
+
 type contextKey string
 
 const jwtClaimsKey contextKey = "jwtClaims"
@@ -27,6 +31,7 @@ func NewAPIServer(listenAddr string, store Storage) *APIServer {
 	return &APIServer{
 		listenAddr: listenAddr,
 		store:      store,
+		validate:   validator.New(),
 	}
 }
 
@@ -34,10 +39,10 @@ func (s *APIServer) Run() {
 	router := mux.NewRouter()
 
 	router.HandleFunc("/login", makeHTTPHandlerFunc(s.handleLogin))
-	router.HandleFunc("/account", makeHTTPHandlerFunc(s.handleAccount))
+	router.HandleFunc("/account", makeHTTPHandlerFunc(s.handleAccount)) //used for debugging and developement purposes
 	router.HandleFunc("/account/{id}", withJWTAuth(makeHTTPHandlerFunc(s.handleGetAccountByID), s.store))
 	router.HandleFunc("/account/{id}/password", withJWTAuth(makeHTTPHandlerFunc(s.handleUpdatePassword), s.store)) // to do
-	router.HandleFunc("/transfer", withJWTAuth(makeHTTPHandlerFunc(s.handleTransfer), s.store))
+	router.HandleFunc("/transfer", withJWTAuth(makeHTTPHandlerFunc(s.handleTransaction), s.store))
 
 	log.Println("JSON API server listening in port: ", s.listenAddr)
 
@@ -119,8 +124,8 @@ func (s *APIServer) handleCreateAccount(w http.ResponseWriter, r *http.Request) 
 	if err := json.NewDecoder(r.Body).Decode(req); err != nil {
 		return err
 	}
-	if req.PhoneNumber == "" || req.FirstName == "" || req.LastName == "" || req.EncryptedPassword == "" {
-		return fmt.Errorf("fields cannot be empty")
+	if err := s.validate.Struct(req); err != nil {
+		return fmt.Errorf("validation failed : %w", err)
 	}
 	account, err := newAccount(req.PhoneNumber, req.FirstName, req.LastName, req.EncryptedPassword)
 	if err != nil {
@@ -130,11 +135,6 @@ func (s *APIServer) handleCreateAccount(w http.ResponseWriter, r *http.Request) 
 		return err
 	}
 
-	// tokenString, err := createJWT(account)
-	// if err != nil {
-	// 	return err
-	// }
-	// fmt.Println("JWT token : ", tokenString)
 	return WriteJSON(w, http.StatusOK, account)
 }
 
@@ -142,6 +142,9 @@ func (s *APIServer) handleUpdateAccount(w http.ResponseWriter, r *http.Request) 
 	req := new(UpdateAccountRequest)
 	if err := json.NewDecoder(r.Body).Decode(req); err != nil {
 		return err
+	}
+	if err := s.validate.Struct(req); err != nil {
+		return fmt.Errorf("invalid update data: %w", err)
 	}
 	id, err := getID(r)
 	if err != nil {
@@ -151,19 +154,7 @@ func (s *APIServer) handleUpdateAccount(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		return err
 	}
-	if req.PhoneNumber != nil {
-		existingAccount.PhoneNumber = *req.PhoneNumber
-	}
-	if req.FirstName != nil {
-		existingAccount.FirstName = *req.FirstName
-	}
-	if req.LastName != nil {
-		existingAccount.LastName = *req.LastName
-	}
-	//preventing first name from being set to empty string
-	if existingAccount.FirstName == "" || existingAccount.LastName == "" || existingAccount.PhoneNumber == "" {
-		return fmt.Errorf("field cannot be empty")
-	}
+	req.mergeInto(existingAccount)
 
 	if err := s.store.UpdateAccount(existingAccount); err != nil {
 		return err
@@ -227,44 +218,69 @@ func (s *APIServer) handleDeleteAccount(w http.ResponseWriter, r *http.Request) 
 	return WriteJSON(w, http.StatusOK, map[string]int{"deleted": id})
 }
 
-func (s *APIServer) handleTransfer(w http.ResponseWriter, r *http.Request) error {
-	if r.Method != "POST" {
-		return fmt.Errorf("method not allowed %s", r.Method)
+func (s *APIServer) handleTransaction(w http.ResponseWriter, r *http.Request) error {
+	if r.Method == "POST" {
+		return s.handleCreateTransaction(w, r)
 	}
+	if r.Method == "GET" {
+		return s.handleGetTransactions(w, r)
+	}
+	return nil
+}
 
+func (s *APIServer) handleCreateTransaction(w http.ResponseWriter, r *http.Request) error {
+	req := new(CreateTransactionRequest)
+	if err := json.NewDecoder(r.Body).Decode(req); err != nil {
+		return err
+	}
+	if err := s.validate.Struct(req); err != nil {
+		return fmt.Errorf("validation failed : %w", err)
+	}
 	claims, ok := r.Context().Value(jwtClaimsKey).(jwt.MapClaims)
 	if !ok {
 		permissionDenied(w)
 		return nil
 	}
 
-	transferReq := new(TransferRequet)
-
-	if err := json.NewDecoder(r.Body).Decode(transferReq); err != nil {
-		return err
-	}
-
 	defer r.Body.Close()
 
-	if transferReq.Amount <= 0 {
-		return fmt.Errorf("transfer amount must be greater than zero")
-	}
-
-	fromAcc, err := s.store.GetAccountByNumber(int(claims["accountNumber"].(float64)))
+	senderAcc, err := s.store.GetAccountByNumber(int(claims["accountNumber"].(float64)))
 	if err != nil {
 		return err
 	}
-	if fromAcc.Number == transferReq.ToAccount {
+	if senderAcc.Number == req.Receivernumber {
 		return fmt.Errorf("cannot transfer money to your own account number")
 	}
-	if fromAcc.Balance < transferReq.Amount {
+	if senderAcc.Balance < req.Amount {
 		return fmt.Errorf("insufficient balance")
 	}
-	err = s.store.Transfer(fromAcc.ID, transferReq.ToAccount, transferReq.Amount)
+
+	transaction, err := newTransaction(senderAcc.ID, req.Receivernumber, req.Amount)
 	if err != nil {
 		return err
 	}
-	return WriteJSON(w, http.StatusOK, transferReq)
+
+	if err := s.store.CreateTransaction(transaction); err != nil {
+		return err
+	}
+
+	return WriteJSON(w, http.StatusOK, transaction)
+}
+
+func (s *APIServer) handleGetTransactions(w http.ResponseWriter, r *http.Request) error {
+	claims, ok := r.Context().Value(jwtClaimsKey).(jwt.MapClaims)
+	if !ok {
+		permissionDenied(w)
+		return nil
+	}
+	acc, err := s.store.GetAccountByNumber(int(claims["accountNumber"].(float64)))
+	if err != nil {
+		return err
+	}
+	transactions, err := s.store.GetTransactions(acc.ID)
+
+	return WriteJSON(w, http.StatusOK, transactions)
+
 }
 
 func WriteJSON(w http.ResponseWriter, status int, v any) error {
@@ -278,8 +294,19 @@ func permissionDenied(w http.ResponseWriter) {
 
 }
 
+func (req *UpdateAccountRequest) mergeInto(acc *Account) {
+	if req.FirstName != nil {
+		acc.FirstName = strings.TrimSpace(*req.FirstName)
+	}
+	if req.LastName != nil {
+		acc.LastName = strings.TrimSpace(*req.LastName)
+	}
+	if req.PhoneNumber != nil {
+		acc.PhoneNumber = strings.TrimSpace(*req.PhoneNumber)
+	}
+}
+
 // jwt stuff
-// JWT token :  eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJFeHBpcmVzQXQiOjE1MTYyMzkwMjIsImFjY291bnROdW1iZXIiOjg3ODh9.EOukzfgAFD3kvNsNNtDHC4zaIWHYKT94rWT0dx0FyJM
 func createJWT(account *Account) (string, error) {
 	// Create the Claims
 	claims := &jwt.MapClaims{
@@ -313,6 +340,7 @@ func withJWTAuth(handlerFunc http.HandlerFunc, s Storage) http.HandlerFunc {
 			userID, err := getID(r)
 			if err != nil {
 				permissionDenied(w)
+				return
 			}
 			account, err := s.GetAccountByID(userID)
 			if err != nil {
